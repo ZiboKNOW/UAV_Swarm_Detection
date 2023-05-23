@@ -1,0 +1,7 @@
+<?xml version="1.0"?>
+<launch>
+	<rosparam file="$(find drone_detection)/param/multi_detection_param.yaml" command="load"/>
+	<node pkg="drone_detection" name="multi_detection" type="multi_detection.py" output="screen" />
+	<node pkg="drone_detection" name="feature_fusion" type="fusion_node.py" output="screen" />
+</launch>
+
