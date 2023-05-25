@@ -4,9 +4,10 @@ import kornia
 import numpy as np
 import torch.nn.functional as F
 class communication_msg_generator:
-    def __init__(self, feat_shape, comm_thre = 0, trans_layer = 0, message_mode = 'Max', comm_round = 2):
+    def __init__(self, feat_shape, drone_id, comm_thre = 0, trans_layer = 0, message_mode = 'Max', comm_round = 2):
         self.feat_H, self.feat_W = feat_shape
         self.comm_thre = comm_thre
+        self.drone_id = drone_id
         self.trans_layer = trans_layer
         self.message_mode = message_mode
         self.comm_round = comm_round
@@ -19,7 +20,7 @@ class communication_msg_generator:
             # noisy_shift_mats = shift_mats[-1]
 
             # Get the value mat (shift global feature to current agent coord) # val_feat: (b, k_agents, q_agents, c, h, w)
-            ego_shift_mats = ori_shift_mats[:,0].unsqueeze(1).expand(-1, num_agents, -1, -1).contiguous() #(b,n,3,3)
+            ego_shift_mats = ori_shift_mats[:,self.drone_id].unsqueeze(1).expand(-1, num_agents, -1, -1).contiguous() #(b,n,3,3)
             # for agent_i in range(num_agents):
             # noisy_shift_mats_k[:,0] = shift_mats_k[:,0] # i to i 没有 noisy
             # shift_mats_k = shift_mats_k.view(num_agents*num_agents, 3, 3).contiguous()  #  (b, num_agents , 3, 3)
@@ -49,7 +50,7 @@ class communication_msg_generator:
 
             val_feats.append(val_feat)
         return val_feats
-    def COLLA_MESSAGE(self, x, shift_mats): #x = (b,agent_num,c,h,w) 其中第一个ego agent，后面的是others，shift也是 [(b,agent_num,3，3)]
+    def COLLA_MESSAGE(self, x, shift_mats):
         val_feats = self.get_colla_feats(x, shift_mats, self.trans_layer) #(b,n,c,h,w) n个agent的features或者confidence都到ego agent的BEV view下
         # val_feats (b，n,c,h,w)
         weight_mats = []
@@ -85,7 +86,7 @@ class communication_msg_generator:
             # if self.message_mode in ['Pointwise']:
             #     x[c_layer] = post_commu_feats[:,:,:-2,:,:]
             # else:
-            x[c_layer][:,0] = post_commu_feats
+            x[c_layer] = post_commu_feats
         return x, weight_mats, val_feats
 
     def communication_graph_learning(self, val_feats, confidence_maps, require_maps, num_agents , round_id=0, thre=0.03, sigma=0):
@@ -157,7 +158,7 @@ class communication_msg_generator:
             # val_feats_aftercom[:,:q,q] = val_feats[:,:q,q] * communication_mask[:,:q,q]
             # val_feats_aftercom[:,q+1:,q] = val_feats[:,q+1:,q] * communication_mask[:,q+1:,q]
         val_feats_to_send = val_feats.unsqueeze(1).contiguous().expand(-1, num_agents - 1, -1, -1, -1).contiguous() * communication_mask_nodiag #(b, agents_num - 1, 1, h, w)
-        return val_feats_to_send, communication_mask, communication_rate, None
+        return val_feats_to_send, communication_mask, communication_rate
 
         
         

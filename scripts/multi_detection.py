@@ -23,6 +23,11 @@ import threading
 from Conet.lib.transformation import get_2d_polygon
 from Conet.lib.Multi_detection_factory.dla34 import features_extractor, decoder
 from Conet.lib.Multi_detection_factory.communication_msg import communication_msg_generator
+
+# temp = sys.stdout
+# f = open('screenshot_new.log', 'w')
+# sys.stdout = f
+
 class ROS_MultiAgentDetector:
     def __init__(self):
         rospy.init_node('Multi_Detection', anonymous = True)
@@ -61,13 +66,10 @@ class ROS_MultiAgentDetector:
         self.worldgrid2worldcoord_mat = np.array([[1, 0, -self.world_X_left], [0, 1, -self.world_Y_left], [0, 0, 1]])
         # self.features_pub = rospy.Publisher('chatter', String, queue_size=10)
         rospy.Timer(rospy.Duration(0.1), self.Pub_Features)
-        temp = sys.stdout
-        f = open('screenshot_new.log', 'w')
-        sys.stdout = f
         self.encoder = features_extractor(pretrained = True, down_ratio =self.down_ratio,feat_shape = self.feat_shape).to(self.device)
         self.decoder = decoder(self.heads, self.encoder.backbone.channels, self.down_ratio).to(self.device)
-        print('current_encoder: ',self.encoder.state_dict())
-        print('current_decoder: ',self.decoder.state_dict())
+        # print('current_encoder: ',self.encoder.state_dict())
+        # print('current_decoder: ',self.decoder.state_dict())
         # self.communication_processor = communication_msg_generator(self.feat_shape, comm_round = self.comm_round)
         self.ts = message_filters.ApproximateTimeSynchronizer([self.image_sub, self.location_sub], 10, 0.5, allow_headerless=False)
         self.ts.registerCallback(self.AlignCallback)
@@ -88,11 +90,6 @@ class ROS_MultiAgentDetector:
             Image = self.msg_pair['Image']
             Odometry = self.msg_pair['Odometry']
             self.lock.release()
-            # ego_drone_sensor_data = drone_sensor()
-            # ego_drone_sensor_data.Images = Image
-            # ego_drone_sensor_data.Location = Odometry
-            # self.sensor_data_pub.publish(ego_drone_sensor_data)
-            
             bridge = CvBridge()
             cv_image = bridge.imgmsg_to_cv2(Image, "bgr8")
             cv_image = cv2.resize(cv_image, (720, 480))
@@ -155,6 +152,7 @@ class ROS_MultiAgentDetector:
             images = images.to(self.device)
             trans_mats = [x.to(self.device) for x in trans_mats]
             shift_mats = [x.to(self.device) for x in shift_mats]
+            print('shift_mats: ',shift_mats[0].size())
             global_x, warp_images_list  = self.encoder(images, trans_mats, shift_mats, 1.0)
             results = self.decoder(global_x,0)
             confidence_map = results['hm_single_r0'].sigmoid_()
@@ -163,7 +161,7 @@ class ROS_MultiAgentDetector:
             communication_mask = torch.where((confidence_map - 0.3)>1e-6, ones_mask, zeros_mask)
             print('max: ',confidence_map.max())
             print('results: ',torch.nonzero(communication_mask).shape)
-            self.msg_encoder(global_x, Image.header.stamp)
+            self.msg_encoder(global_x, Image.header.stamp, shift_mats)
             if self.state == self.states_list['Start_to_Comm']:
                 self.state = self.states_list['In_Comm']
         except CvBridgeError as e:
@@ -332,8 +330,9 @@ class ROS_MultiAgentDetector:
         val_feats_to_send, _, _, _= self.communication_processor.communication_graph_learning(x[0], confidence_maps, require_maps_BEV[0:], self.agent_num , round_id=0, thre=0.03, sigma=0)
         return val_feats_to_send, ego_request, round_id
 
-    def msg_encoder(self, global_x, time_stamp):
+    def msg_encoder(self, global_x, time_stamp, shift_mats):
         data_list=[]
+        shift_list = []
         channels = []
         for n,v in enumerate(global_x):
             _, c, h, w = global_x[n].size()
@@ -344,12 +343,23 @@ class ROS_MultiAgentDetector:
             exec('channels.append(h_dim_{})'.format(n))
             exec('channels.append(w_dim_{})'.format(n))
             data_list.extend(global_x[n].to('cpu').detach().numpy().reshape(-1).tolist())
-        data_list.append(0)
+        
+
+        shift_mat = shift_mats[0]
+        print('origin shift_matrix: ',shift_mat)
+        h_shift, w_shift = shift_mat.size()
+        shift_list.extend(shift_mat.to('cpu').detach().numpy().reshape(-1).tolist())
+        h_dim = MultiArrayDimension(label="height", size=h_shift, stride=h_shift*w_shift)
+        w_dim = MultiArrayDimension(label="width",  size=w_shift, stride=w_shift)
         # print(channels)
         msg = drone_sensor()
         msg.header.stamp = time_stamp
+        # msg.round_id = 0
+        msg.drone_id = self.drone_id
         msg.data.layout = MultiArrayLayout(dim=channels, data_offset=0)
         msg.data.data = data_list
+        msg.shift_matrix.layout = MultiArrayLayout(dim=[h_dim,w_dim], data_offset=0)
+        msg.shift_matrix.data = shift_list
         self.feature_pub.publish(msg)
 
     def state_reset(self,reset):
@@ -370,5 +380,8 @@ class ROS_MultiAgentDetector:
         #     else:
         #         global_x_numpy = np.append(global_x_numpy, global_x[n].to('cpu').detach().numpy(), axis=0)
         # print('size: ',global_x_numpy.size())
+    ################# TO DO ###################
+    #              pub the msg                #
+    ###########################################
 if __name__ == '__main__':
     detector = ROS_MultiAgentDetector()

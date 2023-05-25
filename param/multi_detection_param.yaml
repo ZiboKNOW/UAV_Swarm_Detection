@@ -1,10 +1,12 @@
 Drone_id: 0
 down_ratio: 4
-comm_round: 1
+comm_round: 2
 trans_layer: 0
 agent_num: 2
 heads: {'hm': 1, 'wh': 2, 'reg': 2, 'angle': 2}
 head_conv: 256
 feat_shape: [96, 192]
+channels: [16, 32, 64, 128, 256, 512]
 comm_thre: 0
 map_scale: 1
+time_gap_threshold: 0.1
