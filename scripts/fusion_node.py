@@ -20,12 +20,16 @@ import kornia
 import threading
 from Conet.lib.Multi_detection_factory.communication_msg import communication_msg_generator
 from Conet.lib.Multi_detection_factory.dla34 import decoder
+from Conet.lib.tcp_bridge.tensor2Commsg import msg_process
+from tcp_bridge.msg import ComMessage, Mat2d_33, Mat2d_conf, Mat3d
 
 class features_fusion():
     def __init__(self):
         rospy.init_node('Features_Fusion', anonymous = True)
+        self.name_space = rospy.get_namespace().strip('/')
         self.device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
-        self.decoder_sub = rospy.Subscriber("/ego/feature_data", drone_sensor, self.ego_msg_decoder)
+        self.decoder_sub = rospy.Subscriber("/{}/ego/feature_data".format(self.name_space), drone_sensor, self.ego_msg_decoder)
+        self.tcp_trans = msg_process
         ###################### TO DO #####################
         #              the sub of the TCP                #
         ##################################################
@@ -41,16 +45,16 @@ class features_fusion():
         self.lock = threading.Lock()
         self.buffer_lock = False
 
-        self.down_ratio = rospy.get_param('/down_ratio')
-        self.comm_round = rospy.get_param('/comm_round')
-        self.feat_shape = rospy.get_param('/feat_shape')
-        self.trans_layer = rospy.get_param('/trans_layer')
-        self.agent_num = rospy.get_param('/agent_num')
-        self.drone_id = rospy.get_param('/Drone_id')
-        self.time_gap_threshold = rospy.get_param('/time_gap_threshold')
-        self.channels = rospy.get_param('/channels')
-        self.communication_module = communication_msg_generator(self.feat_shape)
-        self.heads = rospy.get_param('/heads')
+        self.down_ratio = rospy.get_param('/{}/down_ratio'.format(self.name_space))
+        self.comm_round = rospy.get_param('/{}/comm_round'.format(self.name_space))
+        self.feat_shape = rospy.get_param('/{}/feat_shape'.format(self.name_space))
+        self.trans_layer = rospy.get_param('/{}/trans_layer'.format(self.name_space))
+        self.agent_num = rospy.get_param('/{}/agent_num'.format(self.name_space))
+        self.drone_id = rospy.get_param('/{}/Drone_id'.format(self.name_space))
+        self.time_gap_threshold = rospy.get_param('/{}/time_gap_threshold'.format(self.name_space))
+        self.channels = rospy.get_param('/{}/channels'.format(self.name_space))
+        self.communication_module = communication_msg_generator(self.feat_shape,self.drone_id)
+        self.heads = rospy.get_param('/{}/heads'.format(self.name_space))
         self.decoder = decoder(self.heads, self.channels, self.down_ratio).to(self.device)
         rospy.Timer(rospy.Duration(0.1), self.Check_Buffer)
         rospy.spin()
@@ -164,8 +168,8 @@ class features_fusion():
         h_shift = layout_shift.dim[0].size   
         w_shift = layout_shift.dim[1].size
         origin_shift_matrix = torch.tensor(np.array(shift_msg, dtype=np.float32).reshape(h_shift,w_shift))
-        for v in feature_list:
-            print('feature_size: ',v.size())
+        # for v in feature_list:
+        #     print('feature_size: ',v.size())
         if update_dict:
             drone_msg_data= OrderedDict()
             drone_msg_data['features_map'] = feature_list #[b, c, h, w]
@@ -175,6 +179,7 @@ class features_fusion():
             self.lock.acquire()
             self.fusion_buffer.update({'drone_{}_round_{}_msg'.format(data.drone_id,data.round_id):drone_msg_data})
             self.lock.release()
+            print('decoded shift_mat: ',drone_msg_data['shift_mat'])
         else:
             return
         # if round_id == self.round_id:

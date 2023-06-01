@@ -404,26 +404,27 @@ class features_extractor(nn.Module):
         return images, meta
 
     def forward(self, images, trans_mats, shift_mats, map_scale):
-        print(images.size())
-        images = images.squeeze(0)
-        b, img_c, img_h, img_w = images.size()
-        images = images.view(b, img_c, img_h, img_w)
-        x_inter = self.backbone(images)
-        x_inter = self.dla_up(x_inter)
-        x = x_inter
-        scale = 1/map_scale #1
-        # trans_mats = [trans_mats[0]]
-        depth_weighted_feat_maps = [x]
-        global_x_multi_depth = []
-        warp_images_list, global_x = self.hard_warping(shift_mats, trans_mats[0], x, scale, images)
-        single_x = global_x
-        
-        for c_layer, feat_map in enumerate(global_x):
-            _, c, h, w = feat_map.shape
-            feat_map = feat_map.view(b, c, h, w)
-            single_x[c_layer] = feat_map
-        
-        return single_x, warp_images_list
+        with torch.no_grad():
+            print(images.size())
+            images = images.squeeze(0)
+            b, img_c, img_h, img_w = images.size()
+            images = images.view(b, img_c, img_h, img_w)
+            x_inter = self.backbone(images)
+            x_inter = self.dla_up(x_inter)
+            x = x_inter
+            scale = 1/map_scale #1
+            # trans_mats = [trans_mats[0]]
+            depth_weighted_feat_maps = [x]
+            global_x_multi_depth = []
+            warp_images_list, global_x = self.hard_warping(shift_mats, trans_mats[0], x, scale, images)
+            single_x = global_x
+            
+            for c_layer, feat_map in enumerate(global_x):
+                _, c, h, w = feat_map.shape
+                feat_map = feat_map.view(b, c, h, w)
+                single_x[c_layer] = feat_map
+            
+            return single_x, warp_images_list
 
     
 class decoder(nn.Module):
@@ -494,14 +495,18 @@ class decoder(nn.Module):
                     nn.init.constant_(m.bias, 0)
     
     def forward(self,feat_maps,round_id):
-        results = {}
-        ############ Infer the quality map ##############
-        y = []
-        for i in range(self.last_level - self.first_level):
-            b,c, h, w = feat_maps[i].shape
-            y.append(feat_maps[i].view(b, c, h, w).clone())
-        self.ida_up(y, 0, len(y)) #fusion in diff channels
-        for head in self.heads:
-            results[head+'_single_r{}'.format(round_id)] = self.__getattr__(head)(y[-1]) # (b*num_agent, 2, 112, 200)
-        ##################################################
-        return results
+        with torch.no_grad():
+            results = {}
+            ############ Infer the quality map ##############
+            y = []
+            for i in range(self.last_level - self.first_level):
+                b,c, h, w = feat_maps[i].shape
+                y.append(feat_maps[i].view(b, c, h, w).clone())
+            self.ida_up(y, 0, len(y)) #fusion in diff channels
+            for head in self.heads:
+                results[head+'_single_r{}'.format(round_id)] = self.__getattr__(head)(y[-1]) # (b*num_agent, 2, 112, 200)
+            ##################################################
+            return results
+    
+    # def process(self):
+    #     s

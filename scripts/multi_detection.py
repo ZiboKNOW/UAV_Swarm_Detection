@@ -20,10 +20,18 @@ import time
 from typing_extensions import OrderedDict
 import kornia
 import threading
+from tcp_bridge.msg import ComMessage, Mat2d_33, Mat2d_conf, Mat3d
 from Conet.lib.transformation import get_2d_polygon
 from Conet.lib.Multi_detection_factory.dla34 import features_extractor, decoder
 from Conet.lib.Multi_detection_factory.communication_msg import communication_msg_generator
-
+from Conet.lib.tcp_bridge.tensor2Commsg import msg_process
+from Conet.lib.models.decode import ctdet_decode
+from Conet.lib.utils.post_process import ctdet_post_process, polygon_nms
+try:
+    from external.nms import soft_nms
+except:
+    print('NMS not imported! If you need it,'
+          ' do \n cd $CenterNet_ROOT/src/lib/external \n make')
 # temp = sys.stdout
 # f = open('screenshot_new.log', 'w')
 # sys.stdout = f
@@ -31,22 +39,30 @@ from Conet.lib.Multi_detection_factory.communication_msg import communication_ms
 class ROS_MultiAgentDetector:
     def __init__(self):
         rospy.init_node('Multi_Detection', anonymous = True)
-        self.image_sub = message_filters.Subscriber("iris/usb_cam/image_raw", Image)
-        self.location_sub = message_filters.Subscriber("mavros/global_position/local", Odometry)
+        self.name_space = rospy.get_namespace().strip('/')
+        print('namespace: ',self.name_space)
+        self.image_sub = message_filters.Subscriber("/iris/usb_cam/image_raw", Image)
+        self.location_sub = message_filters.Subscriber("/mavros/global_position/local", Odometry)
         # self.location_sub = message_filters.Subscriber("mavros/global_position/local", Bool)
         self.feature_pub = rospy.Publisher("ego/feature_data", drone_sensor, queue_size=10)
         self.states_list = {'Init':0, 'Start_to_Comm':1,'In_Comm':2}
         self.state = self.states_list['Init']
-        self.heads = rospy.get_param('/heads')
+        self.heads = rospy.get_param('/{}/heads'.format(self.name_space))
         self.msg_pair = {}
         self.device = torch.device('cuda' if torch.cuda.is_available() else "cpu")
         self.lock = threading.Lock()
-        self.down_ratio = rospy.get_param('/down_ratio')
-        self.drone_id = rospy.get_param('/Drone_id')
-        self.comm_round = rospy.get_param('/comm_round')
-        self.feat_shape = rospy.get_param('/feat_shape')
-        self.trans_layer = rospy.get_param('/trans_layer')
-        self.agent_num = rospy.get_param('/agent_num')
+        self.down_ratio = rospy.get_param('/{}/down_ratio'.format(self.name_space))
+        self.drone_id = rospy.get_param('/{}/Drone_id'.format(self.name_space))
+        print('self.drone_id: ',self.drone_id)
+        self.comm_round = rospy.get_param('/{}/comm_round'.format(self.name_space))
+        self.feat_shape = rospy.get_param('/{}/feat_shape'.format(self.name_space))
+        self.trans_layer = rospy.get_param('/{}/trans_layer'.format(self.name_space))
+        self.agent_num = rospy.get_param('/{}/agent_num'.format(self.name_space))
+        self.num_classes = rospy.get_param('/{}/num_classes'.format(self.name_space))
+        self.test_scales = rospy.get_param('/{}/test_scales'.format(self.name_space))
+        self.tcp_trans = msg_process
+        self.max_per_image = 100
+        self.tcp_pub = rospy.Publisher("/drone_{}_to_drone_{}_sending".format(self.drone_id,self.drone_id), ComMessage, queue_size=10)
         for i in range(self.agent_num):
             exec('self.reset_sub_{} = rospy.Subscriber("agent_{}/reset", Bool, self.state_reset)'.format(i,i))
         self.height_list = [-1., -0.5, 0., 0.5, 0.75, 1., 1.5, 2., 8.]
@@ -55,6 +71,7 @@ class ROS_MultiAgentDetector:
                                 [0, 0, 1]])
         self.img_index = 0
         self._valid_ids = [1]
+        self.round_id = 0
         self.vis_score_thre = 0.4
         scale_h = 500/500 
         scale_w = 500/500 
@@ -74,8 +91,6 @@ class ROS_MultiAgentDetector:
         self.ts = message_filters.ApproximateTimeSynchronizer([self.image_sub, self.location_sub], 10, 0.5, allow_headerless=False)
         self.ts.registerCallback(self.AlignCallback)
         rospy.spin()
-
-
     def AlignCallback(self, Image, Odometry):
         self.lock.acquire()
         self.msg_pair.update({'Image': Image,'Odometry': Odometry})
@@ -84,6 +99,7 @@ class ROS_MultiAgentDetector:
 
     def Pub_Features(self,event):
         if ('Image' not in self.msg_pair.keys() or 'Odometry' not in self.msg_pair.keys()) or self.state == self.states_list['In_Comm']:
+            # print('there is no image in buffer')
             return
         try:
             self.lock.acquire()
@@ -130,45 +146,88 @@ class ROS_MultiAgentDetector:
                             'trans_mats_p007': trans_mats[0.75], 'trans_mats_p010': trans_mats[1.0], 'trans_mats_p015': trans_mats[1.5], 'trans_mats_p020': trans_mats[2.0],\
                             'trans_mats_p080': trans_mats[8.0], 
                             'shift_mats_1': shift_mats[1], 'shift_mats_2': shift_mats[2], 'shift_mats_4': shift_mats[4], 'shift_mats_8': shift_mats[8],
-                            'trans_mats_withnoise': trans_mats[8.0], 'shift_mats_withnoise': shift_mats[8]}
-            scale = 1.0
-            images = preprocessed_Data['images'][scale]
-            meta = preprocessed_Data['meta'][scale]
-            if isinstance(meta, list):
-                updated_meta = []
-                for cur_meta in meta:
-                    updated_meta.append({k: v.numpy()[0] for k, v in cur_meta.items()})
-                meta = updated_meta
-            else:
-                meta = {k: v.numpy()[0] for k, v in meta.items()}
-            trans_mats = [preprocessed_Data['trans_mats'], preprocessed_Data['trans_mats_n010'], \
-                            preprocessed_Data['trans_mats_n005'], preprocessed_Data['trans_mats_p005'],\
-                            preprocessed_Data['trans_mats_p007'], preprocessed_Data['trans_mats_p010'],\
-                            preprocessed_Data['trans_mats_p015'], preprocessed_Data['trans_mats_p020'],\
-                            preprocessed_Data['trans_mats_p080'], preprocessed_Data['trans_mats_withnoise']]
-            shift_mats = [preprocessed_Data['shift_mats_1'], preprocessed_Data['shift_mats_2'], \
-                            preprocessed_Data['shift_mats_4'], preprocessed_Data['shift_mats_8'], \
-                            preprocessed_Data['shift_mats_withnoise']]
-            images = images.to(self.device)
-            trans_mats = [x.to(self.device) for x in trans_mats]
-            shift_mats = [x.to(self.device) for x in shift_mats]
-            print('shift_mats: ',shift_mats[0].size())
-            global_x, warp_images_list  = self.encoder(images, trans_mats, shift_mats, 1.0)
-            results = self.decoder(global_x,0)
-            confidence_map = results['hm_single_r0'].sigmoid_()
-            ones_mask = torch.ones_like(confidence_map).to(confidence_map.device)
-            zeros_mask = torch.zeros_like(confidence_map).to(confidence_map.device)
-            communication_mask = torch.where((confidence_map - 0.3)>1e-6, ones_mask, zeros_mask)
-            print('max: ',confidence_map.max())
-            print('results: ',torch.nonzero(communication_mask).shape)
-            self.msg_encoder(global_x, Image.header.stamp, shift_mats)
-            if self.state == self.states_list['Start_to_Comm']:
-                self.state = self.states_list['In_Comm']
+                            'trans_mats_withnoise': trans_mats[8.0], 'shift_mats_withnoise': shift_mats[8]}        
+            
+            self.process(preprocessed_Data,Image.header.stamp)   
         except CvBridgeError as e:
             print(e)
 
+    def process(self,preprocessed_Data,time_stamp):
+        detections = []
+        results = []
+        scale = 1.0
+        images = preprocessed_Data['images'][scale]
+        meta = preprocessed_Data['meta'][scale]
+        if isinstance(meta, list):
+            updated_meta = []
+            for cur_meta in meta:
+                updated_meta.append({k: v.numpy()[0] for k, v in cur_meta.items()})
+            meta = updated_meta
+        else:
+            meta = {k: v.numpy()[0] for k, v in meta.items()}
+        trans_mats = [preprocessed_Data['trans_mats'], preprocessed_Data['trans_mats_n010'], \
+                        preprocessed_Data['trans_mats_n005'], preprocessed_Data['trans_mats_p005'],\
+                        preprocessed_Data['trans_mats_p007'], preprocessed_Data['trans_mats_p010'],\
+                        preprocessed_Data['trans_mats_p015'], preprocessed_Data['trans_mats_p020'],\
+                        preprocessed_Data['trans_mats_p080'], preprocessed_Data['trans_mats_withnoise']]
+        shift_mats = [preprocessed_Data['shift_mats_1'], preprocessed_Data['shift_mats_2'], \
+                        preprocessed_Data['shift_mats_4'], preprocessed_Data['shift_mats_8'], \
+                        preprocessed_Data['shift_mats_withnoise']]
+        images = images.to(self.device)
+        trans_mats = [x.to(self.device) for x in trans_mats]
+        shift_mats = [x.to(self.device) for x in shift_mats]
+        global_x, warp_images_list  = self.encoder(images, trans_mats, shift_mats, 1.0)
+        output = self.decoder(global_x, self.round_id)
+        dets = self.dets_process(output,shift_mats)
+        results = []
+        if isinstance(dets, list):
+            for cur_dets, cur_meta in zip(dets, meta):
+                cur_detections = []
+                cur_results = []
 
+                for i in range(len(cur_dets)):
+                    cur_detections.append(self.post_process(cur_dets[i:i+1], cur_meta, scale))
+                    cur_results.append(self.merge_outputs([cur_detections[-1]]))
+                detections.append(cur_detections)
+                results.append(cur_results)
+        else:
+            for i in range(len(dets)):
+                detections.append(self.post_process(dets[i:i+1], meta, scale))
+                results.append(self.merge_outputs([detections[-1]]))
+        confidence_map = output['hm_single_r0'].sigmoid_()
+        ones_mask = torch.ones_like(confidence_map).to(confidence_map.device)
+        zeros_mask = torch.zeros_like(confidence_map).to(confidence_map.device)
+        communication_mask = torch.where((confidence_map - 0.3)>1e-6, ones_mask, zeros_mask)
+        # print('max: ',confidence_map.max())
+        # print('results: ',torch.nonzero(communication_mask).shape)
+        # print('data type: ',type(results))
+        # for k in results.keys():
+        #     print('key: ',k,' size: ',results[k].shape)
 
+        self.msg_encoder(global_x, time_stamp, shift_mats, confidence_map)
+        if self.state == self.states_list['Start_to_Comm']:
+            self.state = self.states_list['In_Comm']
+        
+    
+    def dets_process(self,output,shift_mats):
+        hm = output['hm_single_r{}'.format(self.round_id)].sigmoid_()
+        wh = output['wh_single_r{}'.format(self.round_id)]
+        reg = output['reg_single_r{}'.format(self.round_id)]
+        angle = output['angle_single_r{}'.format(self.round_id)]
+        dets = ctdet_decode(hm, wh, map_scale=1.0, shift_mats=shift_mats[0], reg=reg, angle=angle, cat_spec_wh=False, K=100)
+        return dets
+    
+    def post_process(self, dets, meta, scale=1):
+        dets = dets.detach().cpu().numpy()
+        dets = dets.reshape(1, -1, dets.shape[2])
+        dets = ctdet_post_process(
+            dets.copy(), [meta['c']], [meta['s']],
+            meta['out_height'], meta['out_width'], self.num_classes)
+        for j in range(1, self.num_classes + 1):
+            dets[0][j] = np.array(dets[0][j], dtype=np.float32)
+            dets[0][j] = dets[0][j].reshape(-1, dets[0][j].shape[-1])
+            dets[0][j][:, :(dets[0][j].shape[-1]-1)] /= scale
+        return dets[0]
     # def DetectionCallback(self,Image,Odometry):
     #     print('enter_call_back:',time.time())
     #     try:
@@ -328,9 +387,9 @@ class ROS_MultiAgentDetector:
         else:
             require_maps_list[self.trans_layer[0]] = confidence_maps.unsqueeze(1).contiguous().expand(-1, self.agent_num, -1, -1, -1).contiguous() # (b, num_agents, 1, h, w)
         val_feats_to_send, _, _, _= self.communication_processor.communication_graph_learning(x[0], confidence_maps, require_maps_BEV[0:], self.agent_num , round_id=0, thre=0.03, sigma=0)
-        return val_feats_to_send, ego_request, round_id
+        return val_feats_to_send, ego_request
 
-    def msg_encoder(self, global_x, time_stamp, shift_mats):
+    def msg_encoder(self, global_x, time_stamp, shift_mats, confidence_map):
         data_list=[]
         shift_list = []
         channels = []
@@ -346,7 +405,7 @@ class ROS_MultiAgentDetector:
         
 
         shift_mat = shift_mats[0]
-        print('origin shift_matrix: ',shift_mat)
+        # print('origin shift_matrix: ',shift_mat)
         h_shift, w_shift = shift_mat.size()
         shift_list.extend(shift_mat.to('cpu').detach().numpy().reshape(-1).tolist())
         h_dim = MultiArrayDimension(label="height", size=h_shift, stride=h_shift*w_shift)
@@ -361,14 +420,41 @@ class ROS_MultiAgentDetector:
         msg.shift_matrix.layout = MultiArrayLayout(dim=[h_dim,w_dim], data_offset=0)
         msg.shift_matrix.data = shift_list
         self.feature_pub.publish(msg)
-
+        
+        require_maps = 1 - confidence_map.to('cpu').detach().contiguous()
+        require_maps = require_maps.squeeze(0).squeeze(0).contiguous()
+        shift_mat_tcp = shift_mat.to('cpu').detach().unsqueeze(0).contiguous()
+        features_map_tcp = global_x[0].to('cpu').detach().squeeze(0).contiguous()
+        tcp_msg = self.tcp_trans.tensor2Commsg(self.drone_id, self.round_id, shift_mat_tcp, require_maps, features_map_tcp)
+        print('shape of msg: ',shift_mat_tcp.shape,require_maps.shape,features_map_tcp.shape)
+        print('tcp_masg: ',type(tcp_msg.mat2d_conf.val[0]))
+        self.tcp_pub.publish(tcp_msg)
+        # print('tcp_masg: ',tcp_msg)
     def state_reset(self,reset):
         if reset :
             self.state = self.states_list['Start_to_Comm']
         else:
             return
 
-
+    def merge_outputs(self, detections):
+        results = {}
+        for j in range(1, self.num_classes + 1):
+            results[j] = np.concatenate(
+                [detection[j] for detection in detections], axis=0).astype(np.float32)
+            if len(self.test_scales) > 1:
+                if results[j].shape[-1] > 6:
+                    polygon_nms(results[j], 0.5)
+                else:
+                    soft_nms(results[j], Nt=0.5, method=2)
+        scores = np.hstack(
+            [results[j][:, -1] for j in range(1, self.num_classes + 1)])
+        if len(scores) > self.max_per_image:
+            kth = len(scores) - self.max_per_image
+            thresh = np.partition(scores, kth)[kth]
+            for j in range(1, self.num_classes + 1):
+                keep_inds = (results[j][:, -1] >= thresh)
+                results[j] = results[j][keep_inds]
+        return results
 
 
 
@@ -381,7 +467,7 @@ class ROS_MultiAgentDetector:
         #         global_x_numpy = np.append(global_x_numpy, global_x[n].to('cpu').detach().numpy(), axis=0)
         # print('size: ',global_x_numpy.size())
     ################# TO DO ###################
-    #              pub the msg                #
+    #              pub the msg(confidence_map)                #
     ###########################################
 if __name__ == '__main__':
     detector = ROS_MultiAgentDetector()
