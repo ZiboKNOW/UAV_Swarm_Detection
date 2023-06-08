@@ -1,8 +1,14 @@
 <?xml version="1.0"?>
 <launch>
 	<arg name="id" default="0"/>
+	<arg name="agent_num" default="1"/>
+	<arg name="ego_port" default="8080"/>
+	<arg name="next_port" default="8080"/>
 	<rosparam file="$(find drone_detection)/param/multi_detection_param.yaml" command="load"/>
 	<param name="Drone_id" value="$(arg id)"/>
+	<param name="agent_num" value="$(arg agent_num)"/>
+	<param name="ego_PORT" value="$(arg ego_port)"/>
+	<param name="other_PORT" value="$(arg next_port)"/>
 	<node pkg="drone_detection" name="multi_detection" type="multi_detection.py" output="screen" />
 	<node pkg="drone_detection" name="feature_fusion" type="fusion_node.py" output="screen" />
 	<node pkg="tcp_bridge" name="tcp_bridge" type="tcp_bridge" respawn="true" output="screen" />

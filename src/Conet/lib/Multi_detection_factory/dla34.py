@@ -313,7 +313,7 @@ class features_extractor(nn.Module):
         self.first_level = int(np.log2(down_ratio))
         scales = [2 ** i for i in range(len(channels[self.first_level:]))]
         self.dla_up = DLAUp(self.first_level, channels[self.first_level:], scales)
-        pretrain_dict = torch.load('/home/z/Downloads/20220426_Where2comm/model_best.pth')
+        pretrain_dict = torch.load('/home/cmic2/Downloads/model_best.pth')
         # print('pretrain_dict: ',pretrain_dict)
         model_dict = {}
         state_dict = self.dla_up.state_dict()
@@ -463,7 +463,7 @@ class decoder(nn.Module):
             self.__setattr__(head, fc)            
 
         #######load weights#########
-        pretrain_dict = torch.load('/home/z/Downloads/20220426_Where2comm/model_best.pth')
+        pretrain_dict = torch.load('/home/cmic2/Downloads/model_best.pth')
         model_dict = {}
         state_dict = self.ida_up.state_dict()
         heads_dict={}

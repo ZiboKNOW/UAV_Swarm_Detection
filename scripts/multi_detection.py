@@ -44,7 +44,7 @@ class ROS_MultiAgentDetector:
         self.image_sub = message_filters.Subscriber("/iris/usb_cam/image_raw", Image)
         self.location_sub = message_filters.Subscriber("/mavros/global_position/local", Odometry)
         # self.location_sub = message_filters.Subscriber("mavros/global_position/local", Bool)
-        self.feature_pub = rospy.Publisher("ego/feature_data", drone_sensor, queue_size=10)
+        self.feature_pub = rospy.Publisher("/{}/ego/feature_data".format(self.name_space), drone_sensor, queue_size=10)
         self.states_list = {'Init':0, 'Start_to_Comm':1,'In_Comm':2}
         self.state = self.states_list['Init']
         self.heads = rospy.get_param('/{}/heads'.format(self.name_space))
@@ -62,7 +62,10 @@ class ROS_MultiAgentDetector:
         self.test_scales = rospy.get_param('/{}/test_scales'.format(self.name_space))
         self.tcp_trans = msg_process
         self.max_per_image = 100
-        self.tcp_pub = rospy.Publisher("/drone_{}_to_drone_{}_sending".format(self.drone_id,self.drone_id), ComMessage, queue_size=10)
+        self.next_id = 0
+        if self.drone_id == 0:
+            self.next_id = 1
+        self.tcp_pub = rospy.Publisher("/drone_{}_to_drone_{}_sending".format(self.drone_id,self.next_id), ComMessage, queue_size=10)
         for i in range(self.agent_num):
             exec('self.reset_sub_{} = rospy.Subscriber("agent_{}/reset", Bool, self.state_reset)'.format(i,i))
         self.height_list = [-1., -0.5, 0., 0.5, 0.75, 1., 1.5, 2., 8.]
@@ -405,7 +408,6 @@ class ROS_MultiAgentDetector:
         
 
         shift_mat = shift_mats[0]
-        # print('origin shift_matrix: ',shift_mat)
         h_shift, w_shift = shift_mat.size()
         shift_list.extend(shift_mat.to('cpu').detach().numpy().reshape(-1).tolist())
         h_dim = MultiArrayDimension(label="height", size=h_shift, stride=h_shift*w_shift)
@@ -426,10 +428,7 @@ class ROS_MultiAgentDetector:
         shift_mat_tcp = shift_mat.to('cpu').detach().unsqueeze(0).contiguous()
         features_map_tcp = global_x[0].to('cpu').detach().squeeze(0).contiguous()
         tcp_msg = self.tcp_trans.tensor2Commsg(self.drone_id, self.round_id, shift_mat_tcp, require_maps, features_map_tcp)
-        print('shape of msg: ',shift_mat_tcp.shape,require_maps.shape,features_map_tcp.shape)
-        print('tcp_masg: ',type(tcp_msg.mat2d_conf.val[0]))
         self.tcp_pub.publish(tcp_msg)
-        # print('tcp_masg: ',tcp_msg)
     def state_reset(self,reset):
         if reset :
             self.state = self.states_list['Start_to_Comm']

@@ -15,7 +15,7 @@ class msg_process:
         msg.mat2d_num = tensor_2d_33.shape[0]
         for i in range(9):
             tmp = Mat2d_33()
-            tmp.val = [float(x[i // 3][i % 3]) for x in tensor_2d_33.numpy().tolist() if x[i // 3][i % 3] != 0]
+            tmp.val = [x[i // 3][i % 3] for x in tensor_2d_33.numpy().tolist() if x[i // 3][i % 3] != 0]
             tmp.index = [j for j in range(tensor_2d_33.shape[0]) if tensor_2d_33.numpy().tolist()[j][i // 3][i % 3] != 0]
             tmp.num = len(tmp.val)
             msg.mat2d_33[i] = tmp

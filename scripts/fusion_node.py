@@ -55,23 +55,28 @@ class features_fusion():
         self.channels = rospy.get_param('/{}/channels'.format(self.name_space))
         self.communication_module = communication_msg_generator(self.feat_shape,self.drone_id)
         self.heads = rospy.get_param('/{}/heads'.format(self.name_space))
+        self.in_fusion = False
+
+        self.feature_sub = rospy.Subscriber('/drone_{}_recive'.format(self.drone_id), ComMessage, self.drones_msg_decoder)
         self.decoder = decoder(self.heads, self.channels, self.down_ratio).to(self.device)
         rospy.Timer(rospy.Duration(0.1), self.Check_Buffer)
         rospy.spin()
-    def send_reset(self):
+    def send_reset(self, send_new_msg):
         msg = reset
         msg.drone_id = self.drone_id
-        msg.reset = True
+        msg.reset = send_new_msg
         msg.header.stamp = rospy.Time.now()
-        self.round_id = 0
-        self.fusion_buffer.clear()
-
+        if send_new_msg:
+            self.round_id = 0
+            self.lock.acquire()
+            self.fusion_buffer.clear()
+            self.lock.release()
     def Check_Buffer(self,event):
         self.lock.acquire()
         if len(self.fusion_buffer) == self.agent_num:
             for k,v in self.fusion_buffer:
                 if 'round_{}'.format(self.round_id) not in k:
-                    self.send_reset()
+                    self.send_reset(True)
                     self.lock.release()
                     return
             self.feature_fusion(self.fusion_buffer)  
@@ -80,7 +85,45 @@ class features_fusion():
             self.lock.release()
             return
 
+    def drones_msg_decoder(self, ComMessage):
+        drone_id, agent_round_id, mat33, matconf, mat3d = self.tcp_trans.Commsg2tensor(ComMessage)
+        print('decoder size ','round_id: ',agent_round_id,' mat33: ',mat33.shape,' matconf: ',matconf.shape,' mat3d: ',mat3d.shape)
+        update_dict = False
+        if self.round_id == 0:
+            if agent_round_id == self.round_id and not self.in_fusion:
+                update_dict = True
+                self.send_reset(False)
+                return
+            if agent_round_id > self.round_id and self.in_fusion:
+                update_dict = True
+                return
+            else:
+                self.send_reset(True)
+                return
+        else:
+            if self.round_id <= agent_round_id:
+                update_dict = True
+            else:
+                self.send_reset()
+                return              
+        if update_dict:
+            drone_msg_data= OrderedDict()
+            drone_msg_data['features_map'] = [mat3d] #[b, c, h, w]
+            drone_msg_data['shift_mat'] = [mat33]
+            drone_msg_data['require_mat'] = [matconf]
+            drone_msg_data['round_id'] = agent_round_id
+            drone_msg_data['header'] = ComMessage.header
+            self.lock.acquire()
+            self.fusion_buffer.update({'drone_{}_round_{}_msg'.format(drone_id,agent_round_id):drone_msg_data})
+            self.lock.release()
+            # print('decoded shift_mat: ',drone_msg_data['shift_mat'])
+            # print('ego shape ','features_map: ',drone_msg_data['features_map'][0].shape,' shift_mat: ',drone_msg_data['shift_mat'][0].shape)
+        else:
+            return
+
     def feature_fusion(self, fusion_buffer):
+        print('start fusion')
+        self.in_fusion = True
         time_stamp_list = []
         features_map_list = []
 
@@ -88,14 +131,16 @@ class features_fusion():
         for k,v in fusion_buffer:
             time_stamp_list.append(v['header'].stamp.secs)
         if self.round_id == 0 and max(time_stamp_list) - min(time_stamp_list) > self.time_gap_threshold:
-            self.send_reset()
+            self.send_reset(True)
             self.lock.release()
             return
-        
+        self.lock.release()
         features_map_list = fusion_buffer['drone_{}_round_{}_msg'.format(self.drone_id,self.round_id)]['features_map']
         shift_mat_list = fusion_buffer['drone_{}_round_{}_msg'.format(self.drone_id,self.round_id)]['shift_mat']
         for layer in self.trans_layer:
             fustion_features = features_map_list[layer]
+            b ,c, h, w = fustion_features.shape
+            require_maps = torch.zeros(b, self.agent_num, h, w)
             fustion_features = fustion_features.unsqueeze(1).expand(-1, self.agent_num, -1, -1, -1).contiguous()
             shift_mat = shift_mat_list[layer]
             shift_mat = shift_mat.unsqueeze(0).contiguous()
@@ -103,22 +148,28 @@ class features_fusion():
             for agent in range(self.agent_num):
                 if agent != self.drone_id:
                     b, n ,c, h, w = fustion_features.shape
-                    fustion_features[0, agent] = fusion_buffer['drone_{}_round_{}_msg'.format(agent,self.round_id)]['features_map']
-                    shift_mat[0,agent] = fusion_buffer['drone_{}_round_{}_msg'.format(agent,self.round_id)]['shift_mat']
+                    fustion_features[0, agent] = fusion_buffer['drone_{}_round_{}_msg'.format(agent, self.round_id)]['features_map'][layer]
+                    shift_mat[0,agent] = fusion_buffer['drone_{}_round_{}_msg'.format(agent, self.round_id)]['shift_mat'][layer]
+                    require_maps[0,agent] = fusion_buffer['drone_{}_round_{}_msg'.format(agent, self.round_id)]['require_mat'][layer]
             features_map_list[layer] = fustion_features
             shift_mat_list[layer] = shift_mat
         fused_feature_list, _, _ = self.communication_module.COLLA_MESSAGE(features_map_list, shift_mat_list)
         temp_shift_mat = fusion_buffer['drone_{}_round_{}_msg'.format(self.drone_id,self.round_id)]['shift_mat']
         if self.round_id > self.comm_round:
             results = self.decoder(fused_feature_list, self.round_id)
-            self.send_reset()
+            self.send_reset(True)
         self.lock.acquire()
         self.fusion_buffer.clear()
         self.round_id +=1
         self.lock.release()
+
         ego_msg = self.pack_ego_msg(fused_feature_list,shift_mat_list)
+
         self.fusion_buffer.update({'drone_{}_round_{}_msg'.format(self.drone_id,self.round_id):ego_msg})
         val_feats_to_send, ego_request = self.trans_message_generation(fused_feature_list, shift_mat, require_maps, self.round_id)
+        print(val_feats_to_send.shape,ego_request.shape)
+        self.in_fusion = False
+        return
                 
                 
 
@@ -137,14 +188,14 @@ class features_fusion():
     def ego_msg_decoder(self, data):
         update_dict = False
         if self.round_id == 0:
-            if data.round_id == self.round_id:
+            if data.round_id == self.round_id and not self.in_fusion:
                 update_dict = True
             else:
-                self.send_reset()
-                return
+                self.send_reset(False)
         else:
-            self.send_reset()
+            self.send_reset(True)
             return
+        
         layout = data.data.layout
         channels_num = int(len(layout.dim)/3)
         # print('channels_num: ',channels_num)
@@ -179,26 +230,29 @@ class features_fusion():
             self.lock.acquire()
             self.fusion_buffer.update({'drone_{}_round_{}_msg'.format(data.drone_id,data.round_id):drone_msg_data})
             self.lock.release()
-            print('decoded shift_mat: ',drone_msg_data['shift_mat'])
+            # print('decoded shift_mat: ',drone_msg_data['shift_mat'])
+            print('ego shape ','features_map: ',drone_msg_data['features_map'][0].shape,' shift_mat: ',drone_msg_data['shift_mat'][0].shape)
         else:
             return
         # if round_id == self.round_id:
 
-    def trans_message_generation(self, x, shift_mats, require_maps, round_id): 
+    def trans_message_generation(self, x, shift_mats, agent_require_maps, round_id): 
         results_dict = {}
         b, c, h, w = x[0].shape
         results = self.decoder(x, round_id)
         results_dict.update(results)
         confidence_maps = results['hm_single_r{}'.format(round_id)].clone().sigmoid()
+        print('confidence_maps size: ',confidence_maps.shape)
         confidence_maps = confidence_maps.reshape(b, 1, confidence_maps.shape[-2], confidence_maps.shape[-1])
         require_maps_list = [0,0,0,0]
         ego_request = 1 - confidence_maps.contiguous()
-        if round_id > 0:
-            require_maps_list[self.trans_layer[0]] = torch.cat([confidence_maps.unsqueeze(1).contiguous(),require_maps],dim=1) # (b, num_agents, 1, h, w)
-            require_maps_BEV = self.communication_processor.get_colla_feats(require_maps_list, shift_mats, self.trans_layer) # (b, num_agents, c, h, w) require_maps in BEV maps
-
-        else:
-            require_maps_list[self.trans_layer[0]] = confidence_maps.unsqueeze(1).contiguous().expand(-1, self.agent_num, -1, -1, -1).contiguous() # (b, num_agents, 1, h, w)
+        require_maps = agent_require_maps
+        require_maps = require_maps.unsqueeze(1).contiguous()
+        require_maps[0,self.drone_id,0] = confidence_maps[0,0]
+        require_maps_list[self.trans_layer[0]] = require_maps # (b, num_agents, h, w)
+        require_maps_BEV = self.communication_processor.get_colla_feats(require_maps_list, shift_mats, self.trans_layer) # (b, num_agents, c, h, w) require_maps in BEV maps
+        # else:
+        #     require_maps_list[self.trans_layer[0]] = confidence_maps.unsqueeze(1).contiguous().expand(-1, self.agent_num, -1, -1, -1).contiguous() # (b, num_agents, 1, h, w)
         val_feats_to_send, _, _, _= self.communication_processor.communication_graph_learning(x[0], confidence_maps, require_maps_BEV[1:], self.agent_num , round_id , thre=0.03, sigma=0)
         return val_feats_to_send, ego_request
 
