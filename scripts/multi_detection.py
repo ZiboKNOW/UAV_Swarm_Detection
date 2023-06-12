@@ -9,7 +9,7 @@ import cv2
 from std_msgs.msg import String, Float32MultiArray, MultiArrayLayout,MultiArrayDimension,Bool
 from sensor_msgs.msg import Image
 from nav_msgs.msg import Odometry
-from drone_detection.msg import drone_sensor
+from drone_detection.msg import drone_sensor, reset
 import message_filters
 from cv_bridge import CvBridge, CvBridgeError
 import numpy as np
@@ -53,7 +53,7 @@ class ROS_MultiAgentDetector:
         self.lock = threading.Lock()
         self.down_ratio = rospy.get_param('/{}/down_ratio'.format(self.name_space))
         self.drone_id = rospy.get_param('/{}/Drone_id'.format(self.name_space))
-        print('self.drone_id: ',self.drone_id)
+        self.reset_buffer = OrderedDict()
         self.comm_round = rospy.get_param('/{}/comm_round'.format(self.name_space))
         self.feat_shape = rospy.get_param('/{}/feat_shape'.format(self.name_space))
         self.trans_layer = rospy.get_param('/{}/trans_layer'.format(self.name_space))
@@ -65,9 +65,10 @@ class ROS_MultiAgentDetector:
         self.next_id = 0
         if self.drone_id == 0:
             self.next_id = 1
-        self.tcp_pub = rospy.Publisher("/drone_{}_to_drone_{}_sending".format(self.drone_id,self.next_id), ComMessage, queue_size=10)
-        for i in range(self.agent_num):
-            exec('self.reset_sub_{} = rospy.Subscriber("agent_{}/reset", Bool, self.state_reset)'.format(i,i))
+        self.tcp_pub = rospy.Publisher("/drone_{}_to_drone_{}_sending".format(self.drone_id,self.next_id), ComMessage, queue_size=1)
+        # for i in range(self.agent_num):
+        #     exec('self.reset_sub_{} = rospy.Subscriber("agent_{}/reset", Bool, self.state_reset)'.format(i,i))
+        self.reset_sub = rospy.Subscriber("/reset_topic", reset, self.state_reset)
         self.height_list = [-1., -0.5, 0., 0.5, 0.75, 1., 1.5, 2., 8.]
         self.camera_intrinsic = np.array([[486.023, 0, 359.066],
                                 [0, 486.023, 240.959],
@@ -101,10 +102,15 @@ class ROS_MultiAgentDetector:
         return
 
     def Pub_Features(self,event):
+        self.lock.acquire()
         if ('Image' not in self.msg_pair.keys() or 'Odometry' not in self.msg_pair.keys()) or self.state == self.states_list['In_Comm']:
             # print('there is no image in buffer')
+            # if self.state == self.states_list['In_Comm']:
+            #     print('In_Comm stop pub')
+            self.lock.release()
             return
         try:
+            self.lock.release()
             self.lock.acquire()
             Image = self.msg_pair['Image']
             Odometry = self.msg_pair['Odometry']
@@ -208,8 +214,11 @@ class ROS_MultiAgentDetector:
         #     print('key: ',k,' size: ',results[k].shape)
 
         self.msg_encoder(global_x, time_stamp, shift_mats, confidence_map)
+        self.lock.acquire()
         if self.state == self.states_list['Start_to_Comm']:
             self.state = self.states_list['In_Comm']
+        self.lock.release()
+        return
         
     
     def dets_process(self,output,shift_mats):
@@ -421,19 +430,48 @@ class ROS_MultiAgentDetector:
         msg.data.data = data_list
         msg.shift_matrix.layout = MultiArrayLayout(dim=[h_dim,w_dim], data_offset=0)
         msg.shift_matrix.data = shift_list
+        self.lock.acquire()
+        if self.state == self.states_list['In_Comm']:
+            print('In Comm stop sending')
+            self.lock.release()
+            return
+        self.lock.release()
+        print('send the ego features')
         self.feature_pub.publish(msg)
         
         require_maps = 1 - confidence_map.to('cpu').detach().contiguous()
         require_maps = require_maps.squeeze(0).squeeze(0).contiguous()
         shift_mat_tcp = shift_mat.to('cpu').detach().unsqueeze(0).contiguous()
         features_map_tcp = global_x[0].to('cpu').detach().squeeze(0).contiguous()
-        tcp_msg = self.tcp_trans.tensor2Commsg(self.drone_id, self.round_id, shift_mat_tcp, require_maps, features_map_tcp)
-        self.tcp_pub.publish(tcp_msg)
-    def state_reset(self,reset):
-        if reset :
-            self.state = self.states_list['Start_to_Comm']
-        else:
+        tcp_msg = self.tcp_trans.tensor2Commsg(self.drone_id, self.round_id, shift_mat_tcp, require_maps, features_map_tcp, time_stamp)
+        self.lock.acquire()
+        if self.state == self.states_list['In_Comm']:
+            print('In Comm stop sending')
+            self.lock.release()
             return
+        self.lock.release()
+        print('send the tcp_msg')
+        self.tcp_pub.publish(tcp_msg)
+    def state_reset(self,msg):
+        print ('get drone: ', msg.drone_id,' reset require: ', msg.reset)
+        self.lock.acquire()
+        self.reset_buffer.update({'drone_{}'.format(msg.drone_id):msg.reset})
+        self.lock.release()
+        if len(self.reset_buffer) == self.agent_num:
+            if msg.reset :
+                print('send new image')
+                self.lock.acquire()
+                self.state = self.states_list['Start_to_Comm']
+                self.lock.release()
+            else:
+                print('stop pub image')
+                self.lock.acquire()
+                self.state = self.states_list['In_Comm']
+                self.lock.release()
+            self.lock.acquire()    
+            self.reset_buffer.clear()
+            self.lock.release()
+        return
 
     def merge_outputs(self, detections):
         results = {}

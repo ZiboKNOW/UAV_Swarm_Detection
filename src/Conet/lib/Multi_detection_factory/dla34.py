@@ -405,7 +405,6 @@ class features_extractor(nn.Module):
 
     def forward(self, images, trans_mats, shift_mats, map_scale):
         with torch.no_grad():
-            print(images.size())
             images = images.squeeze(0)
             b, img_c, img_h, img_w = images.size()
             images = images.view(b, img_c, img_h, img_w)

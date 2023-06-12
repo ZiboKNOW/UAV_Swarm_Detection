@@ -7,11 +7,12 @@ import torch
 class msg_process:
     def __init__(self) -> None:
         pass
-    def tensor2Commsg(drone_id, round_id, tensor_2d_33 : torch.Tensor, tensor_2d_conf : torch.Tensor, tensor_3d : torch.Tensor):
+    def tensor2Commsg(drone_id, round_id, tensor_2d_33 : torch.Tensor, tensor_2d_conf : torch.Tensor, tensor_3d : torch.Tensor, time_stamp):
         msg = ComMessage()
         msg.drone_id = drone_id
         msg.turns = round_id
         msg.header = Header()
+        msg.header.stamp = time_stamp
         msg.mat2d_num = tensor_2d_33.shape[0]
         for i in range(9):
             tmp = Mat2d_33()

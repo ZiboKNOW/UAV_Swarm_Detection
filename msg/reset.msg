@@ -1,3 +1,3 @@
-std_msgs/Bool reset
+bool reset
 std_msgs/Int16 drone_id
-std_msgs/Header header
+Header header

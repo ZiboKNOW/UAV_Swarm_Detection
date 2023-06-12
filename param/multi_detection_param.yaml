@@ -1,6 +1,6 @@
 down_ratio: 4
 comm_round: 2
-trans_layer: 0
+trans_layer: [0]
 agent_num: 2
 heads: {'hm': 1, 'wh': 2, 'reg': 2, 'angle': 2}
 head_conv: 256

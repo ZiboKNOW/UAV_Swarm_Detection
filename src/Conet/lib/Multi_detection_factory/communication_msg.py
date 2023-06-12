@@ -4,7 +4,7 @@ import kornia
 import numpy as np
 import torch.nn.functional as F
 class communication_msg_generator:
-    def __init__(self, feat_shape, drone_id, comm_thre = 0, trans_layer = 0, message_mode = 'Max', comm_round = 2):
+    def __init__(self, feat_shape, drone_id, comm_thre = 0, trans_layer = [0], message_mode = 'Max', comm_round = 2):
         self.feat_H, self.feat_W = feat_shape
         self.comm_thre = comm_thre
         self.drone_id = drone_id
@@ -89,19 +89,19 @@ class communication_msg_generator:
             x[c_layer] = post_commu_feats
         return x, weight_mats, val_feats
 
-    def communication_graph_learning(self, val_feats, confidence_maps, require_maps, num_agents , round_id=0, thre=0.03, sigma=0):
+    def communication_graph_learning(self, val_feats, confidence_maps, require_maps, num_agents , round_id = 0, thre=0.03, sigma=0):
         # val_feats: (b, c, h, w) 
         # confidence_maps: (b, 1, h, w)
-        # require_maps: (b, agents_num - 1, 1, h, w)
+        # require_maps: (b, agents_num, 1, h, w)
         # thre: threshold of objectiveness
         # a_ji = (1 - q_i)*q_ji
-        confidence_maps = confidence_maps.unsqueeze(1).contiguous().expand(-1, num_agents - 1, -1, -1, -1).contiguous()
+        confidence_maps = confidence_maps.unsqueeze(1).contiguous().expand(-1, num_agents, -1, -1, -1).contiguous()
         b, _, _ , h, w  = confidence_maps.shape
         if round_id == 0:
             communication_maps = confidence_maps
         else: # more then 1 round the is prev confidence_maps
             # beta = 0
-            communication_maps = confidence_maps * require_maps
+            communication_maps = confidence_maps * require_maps 
             communication_maps = F.relu(communication_maps)
 
         ones_mask = torch.ones_like(communication_maps).to(communication_maps.device)
@@ -109,21 +109,20 @@ class communication_msg_generator:
         communication_mask = torch.where((communication_maps - thre)>1e-6, ones_mask, zeros_mask) #(b, agents_num - 1, 1, h, w)
         # communication_mask, communication_maps_topk = _bandwidthAware_comm_mask(communication_maps, B=1)
 
-        if round_id > 0:
             # Local context
-            communication_mask = self.get_local_mask(communication_mask, kernel_size=11, stride=1) #max pooling (b, agents_num - 1 , 1, h, w)
-            communication_maps = communication_maps * communication_mask
-            communication_thres = [0.0, 0.001, 0.01, 0.03, 0.06, 0.08, 0.1, 0.13, 0.16, 0.20, 0.24, 0.28, 1.0]
-            for thre_idx, comm_thre in enumerate(communication_thres):
-                if (comm_thre == thre) and (thre_idx>=2):
-                    if round_id == 1:
-                        thre = communication_thres[thre_idx-1]
-                    else:
-                        thre = communication_thres[thre_idx-2]
-                    break
-            # thre = min(0.001, thre)
-            # thre = 0.08
-            communication_mask = torch.where((communication_maps - thre)>1e-6, ones_mask, zeros_mask)
+        communication_mask = self.get_local_mask(communication_mask, kernel_size=11, stride=1) #max pooling (b, agents_num - 1 , 1, h, w)
+        communication_maps = communication_maps * communication_mask
+        communication_thres = [0.0, 0.001, 0.01, 0.03, 0.06, 0.08, 0.1, 0.13, 0.16, 0.20, 0.24, 0.28, 1.0]
+        for thre_idx, comm_thre in enumerate(communication_thres):
+            if (comm_thre == thre) and (thre_idx>=2):
+                if round_id == 1:
+                    thre = communication_thres[thre_idx-1]
+                else:
+                    thre = communication_thres[thre_idx-2]
+                break
+        # thre = min(0.001, thre)
+        # thre = 0.08
+        communication_mask = torch.where((communication_maps - thre)>1e-6, ones_mask, zeros_mask)
             # if round_id == 2:
             #     communication_mask = F.relu(communication_mask - prev_communication_mask)
             # communication_mask = _get_topk(communication_maps, k=400)
@@ -157,7 +156,7 @@ class communication_msg_generator:
             # communication_maps_topk_nodiag[:,q,q] = ones_mask[:,q,q]
             # val_feats_aftercom[:,:q,q] = val_feats[:,:q,q] * communication_mask[:,:q,q]
             # val_feats_aftercom[:,q+1:,q] = val_feats[:,q+1:,q] * communication_mask[:,q+1:,q]
-        val_feats_to_send = val_feats.unsqueeze(1).contiguous().expand(-1, num_agents - 1, -1, -1, -1).contiguous() * communication_mask_nodiag #(b, agents_num - 1, 1, h, w)
+        val_feats_to_send = val_feats.unsqueeze(1).contiguous().expand(-1, num_agents, -1, -1, -1).contiguous() * communication_mask_nodiag #(b, agents_num - 1, 1, h, w)
         return val_feats_to_send, communication_mask, communication_rate
 
         
