@@ -22,7 +22,9 @@ from Conet.lib.Multi_detection_factory.communication_msg import communication_ms
 from Conet.lib.Multi_detection_factory.dla34 import decoder
 from Conet.lib.tcp_bridge.tensor2Commsg import msg_process
 from tcp_bridge.msg import ComMessage, Mat2d_33, Mat2d_conf, Mat3d
-
+# temp = sys.stdout
+# f = open('fusion_node.log', 'w')
+# sys.stdout = f
 class features_fusion():
     def __init__(self):
         rospy.init_node('Features_Fusion', anonymous = True)
@@ -63,6 +65,7 @@ class features_fusion():
         self.feature_sub = rospy.Subscriber('/drone_{}_recive'.format(self.drone_id), ComMessage, self.drones_msg_decoder)
         self.decoder = decoder(self.heads, self.channels, self.down_ratio).to(self.device)
         rospy.Timer(rospy.Duration(0.1), self.Check_Buffer)
+        self.round_start_time = time.time()
         rospy.spin()
     def send_reset(self, send_new_msg):
         msg = reset()
@@ -136,6 +139,9 @@ class features_fusion():
 
     def feature_fusion(self):
         print('start fusion')
+        fusion_start_time = time.time()
+        if self.round_id == 0:
+            self.round_start_time = time.time()
         self.in_fusion = True
         time_stamp_list = []
         features_map_list = []
@@ -174,15 +180,14 @@ class features_fusion():
         features_map_list = [x.to(self.device) for x in features_map_list]
         shift_mat_list = [x.to(self.device) for x in shift_mat_list]
         fused_feature_list, _, _ = self.communication_module.COLLA_MESSAGE(features_map_list, shift_mat_list) 
-        for i in fused_feature_list:
-            print('fused_feature_list shape: ',i.shape)
-        print('fused_feature_list: ',fused_feature_list[0].shape)
         # self.lock.acquire()
         # temp_shift_mat = self.fusion_buffer['drone_{}_round_{}_msg'.format(self.drone_id,self.round_id)]['shift_mat']
         # self.lock.release()
-        if self.round_id > self.comm_round:
+        if self.round_id >= self.comm_round - 1:
             results = self.decoder(fused_feature_list, self.round_id)
             print("End fusion, require for new image")
+            round_end_time = time.time()
+            print('round time: ',round_end_time - self.round_start_time,'s')
             self.send_reset(True)
             self.in_fusion = False
             return
@@ -201,6 +206,8 @@ class features_fusion():
 
         # require_maps [1,n,h,w] 其中self.require 为 zeros
         self.in_fusion = False
+        fusion_end_time = time.time()
+        print('fusion_time: ',fusion_end_time - fusion_start_time,'s')
         print('end fusion')
         self.send_tcp_msg(val_feats_to_send.to('cpu').detach().contiguous(), ego_request.to('cpu').detach().contiguous(), self.next_id)
 
@@ -214,10 +221,10 @@ class features_fusion():
         drone_msg_data= OrderedDict()
         drone_msg_data['features_map'] = fused_feature #[b, c, h, w]
         drone_msg_data['shift_mat'] = shift_mat
-        print('shift_size: ',shift_mat[0].shape ,'len: ',len(shift_mat))
+        # print('shift_size: ',shift_mat[0].shape ,'len: ',len(shift_mat))
         for i in self.trans_layer:
             drone_msg_data['shift_mat'][i] = shift_mat[i][0,self.drone_id]
-            print('drone_msg_data shift_mat: ', drone_msg_data['shift_mat'][i].shape)
+            # print('drone_msg_data shift_mat: ', drone_msg_data['shift_mat'][i].shape)
         drone_msg_data['round_id'] = self.round_id
         msg_header = Header()
         msg_header.stamp = rospy.Time.now()
@@ -229,6 +236,9 @@ class features_fusion():
         if self.round_id == 0:
             if data.round_id == self.round_id and not self.in_fusion:
                 update_dict = True
+            elif data.round_id == self.round_id and self.in_fusion:
+                print('In fusion stop revice image')
+                self.send_reset(False)
             else:
                 self.send_reset(False)
         else:
@@ -282,7 +292,7 @@ class features_fusion():
         results_dict.update(results)
         confidence_maps = results['hm_single_r{}'.format(round_id)].clone().sigmoid()
         confidence_maps = confidence_maps.reshape(b, 1, confidence_maps.shape[-2], confidence_maps.shape[-1])
-        print('confidence_maps size: ',confidence_maps.shape) #[1, 1, 96, 192]
+        # print('confidence_maps size: ',confidence_maps.shape) #[1, 1, 96, 192]
         require_maps_list = [0,0,0,0]
         ego_request = 1 - confidence_maps.contiguous()  #[1, 1, 96, 192]
         require_maps = agent_require_maps
@@ -292,9 +302,9 @@ class features_fusion():
         require_maps_BEV = self.communication_module.get_colla_feats(require_maps_list, shift_mats, self.trans_layer) # (b, num_agents, c, h, w) require_maps in BEV maps
         # else:
         #     require_maps_list[self.trans_layer[0]] = confidence_maps.unsqueeze(1).contiguous().expand(-1, self.agent_num, -1, -1, -1).contiguous() # (b, num_agents, 1, h, w)
-        print('require_maps_BEV size: ',require_maps_BEV[0].shape, 'len: ',len(require_maps_BEV)) # [1, 2, 1, 96, 192]
+        # print('require_maps_BEV size: ',require_maps_BEV[0].shape, 'len: ',len(require_maps_BEV)) # [1, 2, 1, 96, 192]
         val_feats_to_send, _, _= self.communication_module.communication_graph_learning(fused_features[0], confidence_maps, require_maps_BEV[0], self.agent_num , round_id , thre=0.03, sigma=0)
-        print('val_feats_to_send: ', val_feats_to_send.shape, 'ego_request: ',ego_request.shape)
+        # print('val_feats_to_send: ', val_feats_to_send.shape, 'ego_request: ',ego_request.shape)
         return val_feats_to_send, ego_request
 
     def send_tcp_msg(self, val_feats_to_send, ego_request,next_id):
